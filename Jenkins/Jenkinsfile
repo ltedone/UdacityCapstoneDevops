@@ -1,0 +1,139 @@
+def app = ""
+pipeline {
+	environment {
+        app = "foo"
+    }
+	agent any
+	stages {
+	   stage('Setup the VEnv') {
+            steps {
+                sh 'cd MicroservicesProj/ && make setup'
+	         }
+        }
+        stage('Install requirements') {
+            steps {
+                sh """
+                    source ~/.devops/bin/activate
+                    cd MicroservicesProj/
+                    make install
+                """
+	         }
+        }
+        stage('Run Lint') {
+            steps {
+                sh """
+                    source ~/.devops/bin/activate
+                    cd MicroservicesProj/
+                    make lint
+                """
+	         }
+        }
+        stage('Build Docker image') {
+            /* This builds the actual image; synonymous to
+            * docker build on the command line */
+            
+            steps {
+                echo 'Building Container..'
+                script {
+                    app = docker.build("ltedone/capstone:app", "-f MicroservicesProj/Dockerfile .")
+                }
+            }
+        }
+        /*('Test image') {
+            // Ideally, we would run a test framework against our image.
+
+            steps {
+                script {
+                    app.inside {
+                        sh 'echo "Tests passed"'
+                    }
+                }
+            }
+        }*/
+        stage('Push image') {
+            /* Finally, we'll push the image with two tags:
+            * First, the incremental build number from Jenkins
+            * Second, the 'latest' tag.
+            * Pushing multiple tags is cheap, as all the layers are reused. */
+            
+            steps {
+                script {
+                    docker.withRegistry('https://registry.hub.docker.com', 'docker-hub-credentials') {
+                        app.push("${env.BUILD_NUMBER}")
+                        app.push("latest")
+                    }
+                }
+            }
+        }
+
+        
+        
+        
+		stage('Set current kubectl context') {
+			steps {
+				withAWS(region:'eu-north-1', credentials:'aws-utente-jenkins') {
+					sh '''
+						kubectl config use-context arn:aws:eks:eu-north-1:081716330195:cluster/prod
+					'''
+				}
+			}
+		}
+
+		stage('Deploy blue container') {
+			steps {
+				withAWS(region:'eu-north-1', credentials:'aws-utente-jenkins') {
+					sh '''
+						kubectl apply -f ./blue-controller.json --insecure-skip-tls-verify=true
+					'''
+				}
+			}
+		}
+
+		stage('Deploy green container') {
+			steps {
+				withAWS(region:'eu-north-1', credentials:'aws-utente-jenkins') {
+					sh '''
+						kubectl apply -f ./green-controller.json --insecure-skip-tls-verify=true
+					'''
+				}
+			}
+		}
+
+		stage('Create the service in the cluster, redirect to blue') {
+			steps {
+				withAWS(region:'eu-north-1', credentials:'aws-utente-jenkins') {
+					sh '''
+						kubectl apply -f ./blue-service.json --insecure-skip-tls-verify=true
+					'''
+				}
+			}
+		}
+
+		stage('Wait user approve') {
+            steps {
+                input "Ready to redirect traffic to green?"
+            }
+        }
+
+		stage('Create the service in the cluster, redirect to green') {
+			steps {
+				withAWS(region:'eu-north-1', credentials:'aws-utente-jenkins') {
+					sh '''
+						kubectl apply -f ./green-service.json --insecure-skip-tls-verify=true
+					'''
+				}
+			}
+		}
+		
+		stage("Cleaning Docker stuffs") {
+            steps {
+                script {
+                    sh "echo 'Cleaning Docker stuffs'"
+                    sh "docker system prune"
+                }
+            }
+        }    
+
+	
+	}
+}
